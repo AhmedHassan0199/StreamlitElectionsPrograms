@@ -1,13 +1,12 @@
 
 import sqlite3
 from pathlib import Path
-import time
+from datetime import datetime, timedelta
 
 import pandas as pd
 import streamlit as st
 from PIL import Image
 import extra_streamlit_components as stx
-from datetime import datetime, timedelta
 
 
 # ===============================
@@ -17,7 +16,7 @@ APP_TITLE = "انتخابات اتحاد الشاغلين – مدينة الم�
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
-IMG_DIR = BASE_DIR / "images"
+IMG_DIR = DATA_DIR / "images"
 DB_PATH = DATA_DIR / "data.db"
 CANDIDATES_CSV = DATA_DIR / "candidates.csv"
 PROGRAMS_DIR = DATA_DIR / "programs"
@@ -51,11 +50,11 @@ def inject_css():
             padding: 16px 24px;
             border-radius: 14px;
             font-weight: 900;
-            font-size: 1.6rem; /* bigger title */
+            font-size: 1.6rem;
             text-align: center;
             display: block;
             width: fit-content;
-            margin: 20px auto 30px auto; /* centered */
+            margin: 20px auto 30px auto;
             box-shadow: 0 8px 24px rgba(39,70,144,0.22);
             letter-spacing: .3px;
         }
@@ -68,7 +67,7 @@ def inject_css():
             border: 1px solid rgba(0,0,0,.05);
             margin-bottom: 14px;
         }
-        /* Pills (labels) — higher contrast */
+        /* Pills (labels) */
         .pill {
             display: inline-block;
             padding: 6px 12px;
@@ -78,6 +77,11 @@ def inject_css():
             margin-left: 6px;
             font-size: 0.95rem;
             border: 1px solid #d6e4ff;
+        }
+        .job {
+            background: #fff4e6;
+            color: #9c6f19;
+            border-color: #ffe8cc;
         }
         /* Buttons */
         .stButton > button {
@@ -92,7 +96,6 @@ def inject_css():
         .btn-like button { background: #e7f5ff !important; }
         .btn-supp button { background: #e6fcf5 !important; }
         .btn-inno button { background: #fff9db !important; }
-        /* Top back button container spacing */
         .back-top { margin: 6px 0 12px 0; }
         </style>
         """,
@@ -119,6 +122,8 @@ def get_reacted_cookie(candidate_id: str) -> str | None:
 # ===============================
 def get_conn():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (BASE_DIR / "images").mkdir(parents=True, exist_ok=True)
+    (DATA_DIR / "programs").mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
         """
@@ -158,7 +163,7 @@ def load_candidates() -> pd.DataFrame:
         st.error(f"Missing candidates file: {CANDIDATES_CSV}")
         st.stop()
     df = pd.read_csv(CANDIDATES_CSV, dtype=str).fillna("")
-    required = ["id", "name", "building", "floor", "apt", "image", "program_file"]
+    required = ["id", "name", "building", "floor", "apt", "job_title", "image", "program_file"]
     missing = [c for c in required if c not in df.columns]
     if missing:
         st.error(f"Missing columns in candidates.csv: {missing}")
@@ -190,7 +195,7 @@ def find_image_case_insensitive(filename: str):
 def candidate_card(cand_row):
     with st.container():
         st.markdown('<div class="soft-card">', unsafe_allow_html=True)
-        cols = st.columns([2, 1])  # RTL info right
+        cols = st.columns([2, 1])
 
         with cols[1]:
             img_path = find_image_case_insensitive(cand_row.get("image", ""))
@@ -203,6 +208,9 @@ def candidate_card(cand_row):
             st.markdown(
                 f"""
                 <h3 style="margin-top:0">{cand_row['name']}</h3>
+                <div style="margin:4px 0 10px 0; color:#6b7280;">
+                    <small>💼 {cand_row['job_title']}</small>
+                </div>
                 <div>
                     <span class="pill">🏢 العقار: {cand_row['building']}</span>
                     <span class="pill">⬆️ الدور: {cand_row['floor']}</span>
@@ -218,19 +226,14 @@ def candidate_card(cand_row):
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-def list_view(df: pd.DataFrame):
-    st.subheader("قائمة المرشحين")
-    with st.expander("---  تصفيات / بحث"):
-        q = st.text_input("ابحث بالاسم أو الكود", "").strip()
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            f_building = st.text_input("العقار", "").strip()
-        with c2:
-            f_floor = st.text_input("الدور", "").strip()
-        with c3:
-            f_apt = st.text_input("الشقة", "").strip()
-
+def _apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
     fdf = df.copy()
+    q = filters.get("q", "").strip()
+    f_building = filters.get("building", "").strip()
+    f_floor = filters.get("floor", "").strip()
+    f_apt = filters.get("apt", "").strip()
+    f_job = filters.get("job_title", "").strip()
+
     if q:
         fdf = fdf[fdf.apply(lambda r: q.lower() in (r["name"] + r["id"]).lower(), axis=1)]
     if f_building:
@@ -239,6 +242,61 @@ def list_view(df: pd.DataFrame):
         fdf = fdf[fdf["floor"].str.contains(f_floor, case=False, na=False)]
     if f_apt:
         fdf = fdf[fdf["apt"].str.contains(f_apt, case=False, na=False)]
+    if f_job:
+        fdf = fdf[fdf["job_title"].str.contains(f_job, case=False, na=False)]
+    return fdf
+
+def list_view(df: pd.DataFrame):
+    st.subheader("قائمة المرشحين")
+
+    if "search_filters" not in st.session_state:
+        st.session_state.search_filters = {}
+    if "form_key" not in st.session_state:
+        st.session_state.form_key = 0
+
+    with st.expander("---  تصفيات / بحث", expanded=True):
+        # Use a form so that filters apply ONLY when pressing the button
+        with st.form(key=f"search_form_{st.session_state.form_key}"):
+            q_live = st.text_input("ابحث بالاسم أو الكود")
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                building_live = st.text_input("العقار")
+            with c2:
+                floor_live = st.text_input("الدور")
+            with c3:
+                apt_live = st.text_input("الشقة")
+            with c4:
+                job_live = st.text_input("المسمّى الوظيفي")
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                search_pressed = st.form_submit_button("بحث 🔎", use_container_width=True)
+            with col_b:
+                reset_pressed = st.form_submit_button("إعادة تعيين ↺", use_container_width=True)
+
+        if search_pressed:
+            st.session_state.search_filters = {
+                "q": q_live or "",
+                "building": building_live or "",
+                "floor": floor_live or "",
+                "apt": apt_live or "",
+                "job_title": job_live or "",
+            }
+            st.rerun()
+
+        if reset_pressed:
+            st.session_state.search_filters = {}
+            # bump form key to recreate widgets empty next run
+            st.session_state.form_key += 1
+            st.rerun()
+
+    # Apply only the filters saved by clicking "بحث"
+    active = st.session_state.search_filters
+    if active:
+        fdf = _apply_filters(df, active)
+        st.caption(f"نتائج البحث: {len(fdf)} مرشح/مرشحة")
+    else:
+        fdf = df.copy()
 
     if fdf.empty:
         st.info("لا توجد نتائج مطابقة.")
@@ -258,7 +316,6 @@ def profile_view(df: pd.DataFrame, candidate_id: str):
 
     cand = match.iloc[0]
 
-    # Top back button (better UX)
     st.markdown('<div class="back-top">', unsafe_allow_html=True)
     if st.button("← الرجوع إلى قائمة المرشحين", key=f"back_top_{cand['id']}"):
         st.query_params.clear()
@@ -266,7 +323,7 @@ def profile_view(df: pd.DataFrame, candidate_id: str):
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown(f"<div class='title-badge'>الصفحة التعريفية — {cand['name']}</div>", unsafe_allow_html=True)
-    st.caption(f"🏢 {cand['building']}  •  ⬆️ {cand['floor']}  •  🚪 {cand['apt']}  •  🆔 {cand['id']}")
+    st.caption(f"💼 {cand['job_title']}  •  🏢 {cand['building']}  •  ⬆️ {cand['floor']}  •  🚪 {cand['apt']}  •  🆔 {cand['id']}")
 
     cols = st.columns([2, 1])
     img_path = find_image_case_insensitive(cand.get("image", ""))
@@ -277,7 +334,6 @@ def profile_view(df: pd.DataFrame, candidate_id: str):
         else:
             st.image(Image.new("RGB", (400, 400), color=(235, 235, 235)), use_container_width=True)
 
-        # Reactions (emoji only + cookies limit)
         conn = get_conn()
         counts = get_reaction_counts(conn, cand["id"]) or {}
 
@@ -320,7 +376,6 @@ def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     inject_css()
 
-    # Centered title only
     st.markdown(f"<div class='title-badge'>{APP_TITLE}</div>", unsafe_allow_html=True)
 
     df = load_candidates()
